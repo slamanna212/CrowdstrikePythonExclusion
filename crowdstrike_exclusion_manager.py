@@ -314,13 +314,13 @@ def get_child_cids(auth: OAuth2, name_filter: str = "") -> List[Dict]:
         return sample_cids
 
 
-def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_token: str) -> Dict:
+def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
     """Create sensor visibility exclusion for a specific CID."""
     try:
         logging.info(f"Creating exclusion for CID {cid}: {exclusion_value}")
         
-        # Initialize SensorVisibilityExclusions service for specific CID
-        exclusions = SensorVisibilityExclusions(access_token=auth_token, member_cid=cid)
+        # Initialize SensorVisibilityExclusions service for specific CID with consistent base URL
+        exclusions = SensorVisibilityExclusions(access_token=auth_token, member_cid=cid, base_url=base_url)
         
         # Create the exclusion
         exclusion_data = {
@@ -330,6 +330,26 @@ def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_
         }
         
         result = exclusions.create_exclusions(**exclusion_data)
+        
+        # Handle case where API returns bytes instead of dict (usually due to 308 redirect)
+        if isinstance(result, bytes):
+            logging.error(f"SensorVisibilityExclusions API returned bytes for CID {cid}")
+            return {
+                'success': False,
+                'status_code': 0,
+                'response': {'error': 'API returned bytes instead of expected dict response'},
+                'exclusion_id': ''
+            }
+        
+        # Handle case where API returns non-dict response
+        if not isinstance(result, dict):
+            logging.error(f"SensorVisibilityExclusions API returned unexpected type for CID {cid}: {type(result)}")
+            return {
+                'success': False,
+                'status_code': 0,
+                'response': {'error': f'API returned unexpected response type: {type(result)}'},
+                'exclusion_id': ''
+            }
         
         success = result['status_code'] in [200, 201]
         exclusion_id = ''
@@ -412,7 +432,8 @@ def main():
             cid, 
             inputs['exclusion_value'], 
             inputs['exclusion_comment'],
-            auth.token()['body']['access_token']
+            auth.token()['body']['access_token'],
+            getattr(auth, 'base_url', 'https://api.us-2.crowdstrike.com')
         )
         
         if result['success']:
