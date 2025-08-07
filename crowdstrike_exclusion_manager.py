@@ -15,7 +15,7 @@ import logging
 import json
 import os
 from typing import List, Dict, Optional
-from falconpy import OAuth2, SensorVisibilityExclusions, FlightControl
+from falconpy import OAuth2, SensorVisibilityExclusions, FlightControl, HostGroup
 
 
 def load_credentials() -> Dict[str, str]:
@@ -314,6 +314,34 @@ def get_child_cids(auth: OAuth2, name_filter: str = "") -> List[Dict]:
         return sample_cids
 
 
+def get_host_groups_for_cid(cid: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> List[str]:
+    """Get all host group IDs for a specific CID."""
+    try:
+        logging.info(f"Retrieving host groups for CID {cid}")
+        
+        # Initialize HostGroup service for specific CID
+        host_groups = HostGroup(access_token=auth_token, member_cid=cid, base_url=base_url)
+        
+        # Query all host groups
+        query_result = host_groups.query_host_groups()
+        
+        if isinstance(query_result, bytes) or not isinstance(query_result, dict):
+            logging.error(f"HostGroup API returned unexpected type for CID {cid}: {type(query_result)}")
+            return []
+        
+        if query_result.get('status_code') != 200:
+            logging.error(f"Failed to query host groups for CID {cid}: {query_result}")
+            return []
+        
+        group_ids = query_result['body']['resources']
+        logging.info(f"Found {len(group_ids)} host groups for CID {cid}")
+        return group_ids
+        
+    except Exception as e:
+        logging.error(f"Exception retrieving host groups for CID {cid}: {e}")
+        return []
+
+
 def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
     """Create sensor visibility exclusion for a specific CID."""
     try:
@@ -322,11 +350,18 @@ def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_
         # Initialize SensorVisibilityExclusions service for specific CID with consistent base URL
         exclusions = SensorVisibilityExclusions(access_token=auth_token, member_cid=cid, base_url=base_url)
         
+        # Get all host groups for this CID
+        host_groups = get_host_groups_for_cid(cid, auth_token, base_url)
+        
+        if not host_groups:
+            logging.warning(f"No host groups found for CID {cid}, trying to apply to all groups using wildcard")
+            host_groups = ["all"]  # Try using "all" as suggested in the FalconPy documentation
+        
         # Create the exclusion
         exclusion_data = {
             "comment": comment,
             "value": exclusion_value,
-            "groups": []  # Empty groups means apply to all host groups
+            "groups": host_groups
         }
         
         result = exclusions.create_exclusions(**exclusion_data)
