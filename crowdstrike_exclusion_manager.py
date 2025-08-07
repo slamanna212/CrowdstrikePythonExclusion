@@ -12,8 +12,50 @@ import sys
 import getpass
 import time
 import logging
+import json
+import os
 from typing import List, Dict, Optional
 from falconpy import OAuth2, SensorVisibilityExclusions, FlightControl
+
+
+def load_credentials() -> Dict[str, str]:
+    """Load API credentials from config.json file."""
+    config_file = 'config.json'
+    
+    if not os.path.exists(config_file):
+        print(f"❌ Config file '{config_file}' not found!")
+        print("Please create a config.json file with your CrowdStrike API credentials.")
+        print("You can copy config.json.example and update it with your actual credentials:")
+        print()
+        print("  cp config.json.example config.json")
+        print("  # Then edit config.json with your actual API credentials")
+        print()
+        sys.exit(1)
+    
+    try:
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        if not config.get('client_id') or not config.get('client_secret'):
+            print("❌ Missing client_id or client_secret in config.json")
+            sys.exit(1)
+        
+        if config['client_id'] == 'YOUR_CLIENT_ID_HERE' or config['client_secret'] == 'YOUR_CLIENT_SECRET_HERE':
+            print("❌ Please update config.json with your actual CrowdStrike API credentials")
+            sys.exit(1)
+        
+        logging.info("✓ Successfully loaded API credentials from config.json")
+        return {
+            'client_id': config['client_id'],
+            'client_secret': config['client_secret']
+        }
+        
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing config.json: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error reading config.json: {e}")
+        sys.exit(1)
 
 
 def setup_logging() -> None:
@@ -43,8 +85,9 @@ def get_user_inputs() -> Dict[str, str]:
     print("CrowdStrike Falcon Exclusion Manager")
     print("=" * 40)
     
-    client_id = input("Enter CrowdStrike API Client ID: ").strip()
-    client_secret = getpass.getpass("Enter CrowdStrike API Client Secret: ")
+    # Load credentials from config file
+    credentials = load_credentials()
+    print("✓ API credentials loaded from config.json")
     
     # Get CID filtering options
     print("\n--- Child CID Filtering ---")
@@ -59,8 +102,8 @@ def get_user_inputs() -> Dict[str, str]:
     exclusion_comment = input("Enter exclusion comment: ").strip()
     
     return {
-        'client_id': client_id,
-        'client_secret': client_secret,
+        'client_id': credentials['client_id'],
+        'client_secret': credentials['client_secret'],
         'cid_filter': cid_filter,
         'exclusion_value': exclusion_value,
         'exclusion_comment': exclusion_comment

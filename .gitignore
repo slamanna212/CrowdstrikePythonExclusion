@@ -1,2 +1,5 @@
 # Log files
 *.log
+
+# Configuration files with sensitive information
+config.json
