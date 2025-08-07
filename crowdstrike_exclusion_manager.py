@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 #Test git with new line
 """
-CrowdStrike Falcon Sensor Visibility Exclusion Manager
+CrowdStrike Falcon IOA Exclusion Manager
 
-This script manages sensor visibility exclusions across multiple child CIDs
+This script manages IOA (Indicator of Attack) exclusions across multiple child CIDs
 under a parent CrowdStrike Falcon account. It allows filtering of child CIDs
-by name and applies exclusions to selected environments.
+by name and applies IOA exclusions to selected environments.
 """
 
 import sys
@@ -15,7 +15,7 @@ import logging
 import json
 import os
 from typing import List, Dict, Optional
-from falconpy import OAuth2, SensorVisibilityExclusions, FlightControl, HostGroup
+from falconpy import OAuth2, IOAExclusions, FlightControl, HostGroup
 
 
 def load_credentials() -> Dict[str, str]:
@@ -82,7 +82,7 @@ def rate_limit_delay(operation_count: int, max_operations_per_minute: int = 30) 
 
 def get_user_inputs() -> Dict[str, str]:
     """Collect required user inputs."""
-    print("CrowdStrike Falcon Exclusion Manager")
+    print("CrowdStrike Falcon IOA Exclusion Manager")
     print("=" * 40)
     
     # Load credentials from config file
@@ -96,16 +96,34 @@ def get_user_inputs() -> Dict[str, str]:
     if filter_option == 'y':
         cid_filter = input("Enter CID name filter (partial match): ").strip()
     
-    # Get exclusion details
-    print("\n--- Exclusion Details ---")
-    exclusion_value = input("Enter exclusion value (path/process): ").strip()
-    exclusion_comment = input("Enter exclusion comment: ").strip()
+    # Get IOA exclusion details
+    print("\n--- IOA Exclusion Details ---")
+    print("Note: pattern_id comes from existing IOA detections in CrowdStrike Console")
+    print("Go to Activity > Detections, find the IOA detection, and copy the pattern ID")
+    pattern_id = input("Enter IOA pattern_id (required): ").strip()
+    pattern_name = input("Enter pattern name (optional): ").strip()
+    exclusion_name = input("Enter exclusion name: ").strip()
+    exclusion_description = input("Enter exclusion description (optional): ").strip()
+    image_filename = input("Enter image filename pattern (regex, optional): ").strip()
+    command_line = input("Enter command line pattern (regex, optional): ").strip()
+    exclusion_comment = input("Enter exclusion comment (optional): ").strip()
+    
+    # Validate required field
+    if not pattern_id:
+        print("❌ Error: pattern_id is required for IOA exclusions!")
+        print("Please find the pattern_id from an IOA detection in the CrowdStrike console.")
+        sys.exit(1)
     
     return {
         'client_id': credentials['client_id'],
         'client_secret': credentials['client_secret'],
         'cid_filter': cid_filter,
-        'exclusion_value': exclusion_value,
+        'pattern_id': pattern_id,
+        'pattern_name': pattern_name,
+        'exclusion_name': exclusion_name,
+        'exclusion_description': exclusion_description,
+        'image_filename': image_filename,
+        'command_line': command_line,
         'exclusion_comment': exclusion_comment
     }
 
@@ -314,16 +332,17 @@ def get_child_cids(auth: OAuth2, name_filter: str = "") -> List[Dict]:
         return sample_cids
 
 
-def get_host_groups_for_cid(cid: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> List[str]:
-    """Get all host group IDs for a specific CID."""
+def get_host_groups_for_cid(cid: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> List[Dict]:
+    """Get all host groups with details (ID and name) for a specific CID."""
     try:
         logging.info(f"Retrieving host groups for CID {cid}")
         
         # Initialize HostGroup service for specific CID
-        host_groups = HostGroup(access_token=auth_token, member_cid=cid, base_url=base_url)
+        # Use member_cid parameter to target the child CID
+        host_groups_service = HostGroup(access_token=auth_token, base_url=base_url, member_cid=cid)
         
-        # Query all host groups
-        query_result = host_groups.query_host_groups()
+        # Query all host group IDs
+        query_result = host_groups_service.query_host_groups()
         
         if isinstance(query_result, bytes) or not isinstance(query_result, dict):
             logging.error(f"HostGroup API returned unexpected type for CID {cid}: {type(query_result)}")
@@ -334,41 +353,137 @@ def get_host_groups_for_cid(cid: str, auth_token: str, base_url: str = 'https://
             return []
         
         group_ids = query_result['body']['resources']
-        logging.info(f"Found {len(group_ids)} host groups for CID {cid}")
-        return group_ids
+        logging.info(f"Found {len(group_ids)} host group IDs for CID {cid}")
+        
+        if not group_ids:
+            return []
+        
+        # Get detailed information for each group
+        details_result = host_groups_service.get_host_groups(ids=group_ids)
+        
+        if isinstance(details_result, bytes) or not isinstance(details_result, dict):
+            logging.error(f"HostGroup details API returned unexpected type for CID {cid}: {type(details_result)}")
+            return []
+        
+        if details_result.get('status_code') != 200:
+            logging.error(f"Failed to get host group details for CID {cid}: {details_result}")
+            return []
+        
+        groups_with_details = []
+        for group in details_result['body']['resources']:
+            groups_with_details.append({
+                'id': group['id'],
+                'name': group.get('name', 'Unknown'),
+                'description': group.get('description', '')
+            })
+        
+        logging.info(f"Retrieved details for {len(groups_with_details)} host groups for CID {cid}")
+        for group in groups_with_details:
+            logging.info(f"  Group: {group['name']} ({group['id']})")
+        
+        return groups_with_details
         
     except Exception as e:
         logging.error(f"Exception retrieving host groups for CID {cid}: {e}")
         return []
 
 
-def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
-    """Create sensor visibility exclusion for a specific CID."""
+def find_windows_hosts_group(host_groups: List[Dict]) -> List[str]:
+    """Find the best matching host group for 'Windows Hosts'."""
+    if not host_groups:
+        return []
+    
+    # Exact match first
+    for group in host_groups:
+        if group['name'].lower() == 'windows hosts':
+            logging.info(f"Found exact match for 'Windows Hosts': {group['name']} ({group['id']})")
+            return [group['id']]
+    
+    # Fuzzy matching - look for groups containing 'windows' and 'host'
+    windows_groups = []
+    for group in host_groups:
+        group_name_lower = group['name'].lower()
+        if 'windows' in group_name_lower and 'host' in group_name_lower:
+            windows_groups.append(group)
+            logging.info(f"Found Windows host group match: {group['name']} ({group['id']})")
+    
+    if windows_groups:
+        # If multiple matches, prefer the one with the shortest name (most specific)
+        best_match = min(windows_groups, key=lambda g: len(g['name']))
+        logging.info(f"Selected best Windows host group match: {best_match['name']} ({best_match['id']})")
+        return [best_match['id']]
+    
+    # Fallback - look for groups containing just 'windows'
+    for group in host_groups:
+        if 'windows' in group['name'].lower():
+            logging.info(f"Found fallback Windows group: {group['name']} ({group['id']})")
+            return [group['id']]
+    
+    # Last resort - look for any group containing 'host'
+    for group in host_groups:
+        if 'host' in group['name'].lower():
+            logging.info(f"Found fallback host group: {group['name']} ({group['id']})")
+            return [group['id']]
+    
+    # If no good matches, use the first available group
+    if host_groups:
+        logging.warning(f"No Windows/host groups found, using first available: {host_groups[0]['name']} ({host_groups[0]['id']})")
+        return [host_groups[0]['id']]
+    
+    return []
+
+
+def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, pattern_name: str, exclusion_name: str, exclusion_description: str, image_filename: str, command_line: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
+    """Create IOA exclusion for a specific CID."""
     try:
-        logging.info(f"Creating exclusion for CID {cid}: {exclusion_value}")
+        logging.info(f"Creating IOA exclusion for CID {cid}: {exclusion_name}")
         
-        # Initialize SensorVisibilityExclusions service for specific CID with consistent base URL
-        exclusions = SensorVisibilityExclusions(access_token=auth_token, member_cid=cid, base_url=base_url)
+        # Initialize IOAExclusions service for specific CID
+        ioa_exclusions = IOAExclusions(access_token=auth_token, base_url=base_url, member_cid=cid)
         
-        # Get all host groups for this CID
-        host_groups = get_host_groups_for_cid(cid, auth_token, base_url)
+        # Get host groups for this CID and find Windows Hosts group
+        host_groups_details = get_host_groups_for_cid(cid, auth_token, base_url)
         
-        if not host_groups:
-            logging.warning(f"No host groups found for CID {cid}, trying to apply to all groups using wildcard")
-            host_groups = ["all"]  # Try using "all" as suggested in the FalconPy documentation
+        if not host_groups_details:
+            logging.warning(f"No host groups found for CID {cid}, creating exclusion without group restriction")
+            target_group_ids = []  # Empty list means no specific groups
+        else:
+            # Find the best matching Windows Hosts group
+            target_group_ids = find_windows_hosts_group(host_groups_details)
+            if target_group_ids:
+                # Find the group name for logging
+                selected_group = next((g for g in host_groups_details if g['id'] == target_group_ids[0]), None)
+                if selected_group:
+                    logging.info(f"Targeting Windows Hosts group: {selected_group['name']} ({selected_group['id']})")
+                    print(f"  Targeting group: {selected_group['name']}")
+            else:
+                logging.warning(f"No suitable Windows Hosts group found for CID {cid}")
+                target_group_ids = []
         
-        # Create the exclusion
-        exclusion_data = {
-            "comment": comment,
-            "value": exclusion_value,
-            "groups": host_groups
+        # Create the IOA exclusion - pattern_id is required, others are optional
+        exclusion_params = {
+            'pattern_id': pattern_id,
+            'groups': target_group_ids
         }
         
-        result = exclusions.create_exclusions(**exclusion_data)
+        if pattern_name:
+            exclusion_params['pattern_name'] = pattern_name
+        if exclusion_name:
+            exclusion_params['name'] = exclusion_name
+        if exclusion_description:
+            exclusion_params['description'] = exclusion_description
+        if image_filename:
+            exclusion_params['ifn_regex'] = image_filename
+        if command_line:
+            exclusion_params['cl_regex'] = command_line
+        if comment:
+            exclusion_params['comment'] = comment
+        
+        result = ioa_exclusions.create_exclusions(**exclusion_params)
         
         # Handle case where API returns bytes instead of dict (usually due to 308 redirect)
         if isinstance(result, bytes):
-            logging.error(f"SensorVisibilityExclusions API returned bytes for CID {cid}")
+            logging.error(f"IOAExclusions API returned bytes for CID {cid}")
             return {
                 'success': False,
                 'status_code': 0,
@@ -378,7 +493,7 @@ def create_exclusion_for_cid(cid: str, exclusion_value: str, comment: str, auth_
         
         # Handle case where API returns non-dict response
         if not isinstance(result, dict):
-            logging.error(f"SensorVisibilityExclusions API returned unexpected type for CID {cid}: {type(result)}")
+            logging.error(f"IOAExclusions API returned unexpected type for CID {cid}: {type(result)}")
             return {
                 'success': False,
                 'status_code': 0,
@@ -419,7 +534,7 @@ def main():
     # Setup logging
     setup_logging()
     
-    logging.info("Starting CrowdStrike Falcon Exclusion Manager")
+    logging.info("Starting CrowdStrike Falcon IOA Exclusion Manager")
     
     # Get user inputs
     inputs = get_user_inputs()
@@ -449,8 +564,8 @@ def main():
     failed_cids = []
     operation_count = 0
     
-    logging.info(f"Starting to apply exclusion '{inputs['exclusion_value']}' to {len(child_cids)} CIDs")
-    print(f"\nApplying exclusion: {inputs['exclusion_value']}")
+    logging.info(f"Starting to apply IOA exclusion '{inputs['exclusion_name']}' to {len(child_cids)} CIDs")
+    print(f"\nApplying IOA exclusion: {inputs['exclusion_name']}")
     print("=" * 50)
     
     for cid_info in child_cids:
@@ -463,9 +578,14 @@ def main():
         # Apply rate limiting
         rate_limit_delay(operation_count)
         
-        result = create_exclusion_for_cid(
+        result = create_ioa_exclusion_for_cid(
             cid, 
-            inputs['exclusion_value'], 
+            inputs['pattern_id'],
+            inputs['pattern_name'],
+            inputs['exclusion_name'],
+            inputs['exclusion_description'],
+            inputs['image_filename'],
+            inputs['command_line'],
             inputs['exclusion_comment'],
             auth.token()['body']['access_token'],
             getattr(auth, 'base_url', 'https://api.us-2.crowdstrike.com')
@@ -491,9 +611,14 @@ def main():
     print(f"Successful: {len(successful_cids)}")
     print(f"Failed: {len(failed_cids)}")
     
-    print(f"\nExclusion Details:")
-    print(f"  Value: {inputs['exclusion_value']}")
-    print(f"  Comment: {inputs['exclusion_comment']}")
+    print(f"\nIOA Exclusion Details:")
+    print(f"  Pattern ID: {inputs['pattern_id']}")
+    print(f"  Pattern Name: {inputs['pattern_name'] or 'None'}")
+    print(f"  Name: {inputs['exclusion_name']}")
+    print(f"  Description: {inputs['exclusion_description'] or 'None'}")
+    print(f"  Image Filename Pattern (ifn_regex): {inputs['image_filename'] or 'None'}")
+    print(f"  Command Line Pattern (cl_regex): {inputs['command_line'] or 'None'}")
+    print(f"  Comment: {inputs['exclusion_comment'] or 'None'}")
     
     if successful_cids:
         print("\n✓ Successfully modified CIDs:")
