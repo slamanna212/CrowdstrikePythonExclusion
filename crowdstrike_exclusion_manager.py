@@ -104,51 +104,85 @@ def get_child_cids(auth: OAuth2, name_filter: str = "") -> List[Dict]:
         
         print(f"Retrieving child CIDs{' with filter: ' + name_filter if name_filter else ''}...")
         
-        # Query all child CIDs
-        # First get the list of child CID IDs
-        logging.debug("About to call flight_control.query_children()")
-        try:
-            query_result = flight_control.query_children()
-            logging.debug(f"query_children() returned: type={type(query_result)}, content={query_result}")
-        except Exception as query_error:
-            logging.error(f"Error in query_children(): {query_error}")
-            logging.debug(f"Query error type: {type(query_error)}")
-            raise
+        # Query all child CIDs with pagination support
+        logging.debug("About to call flight_control.query_children() with pagination")
+        all_child_cid_ids = []
+        offset = 0
+        limit = 100  # Request more per page
         
-        # Handle case where API returns bytes instead of dict (usually due to 308 redirect)
-        if isinstance(query_result, bytes):
-            logging.error("API returned bytes instead of expected dict response")
-            print("API endpoint returned unexpected response format (likely due to 308 redirect)")
-            print("This may indicate a region-specific endpoint issue or API version mismatch")
-            return []
+        while True:
+            try:
+                # Call with limit and offset for pagination
+                logging.info(f"Querying child CIDs: offset={offset}, limit={limit}")
+                print(f"Querying child CIDs: offset={offset}, limit={limit}")
+                
+                query_result = flight_control.query_children(
+                    limit=limit,
+                    offset=offset
+                )
+                logging.debug(f"query_children() returned: type={type(query_result)}")
+                
+            except Exception as query_error:
+                logging.error(f"Error in query_children(): {query_error}")
+                logging.debug(f"Query error type: {type(query_error)}")
+                raise
         
-        # Handle case where API returns non-dict response
-        if not isinstance(query_result, dict):
-            logging.error(f"API returned unexpected type: {type(query_result)}")
-            print(f"API returned unexpected response type: {type(query_result)}")
-            return []
-        
-        logging.debug(f"query_result status_code: {query_result.get('status_code', 'No status_code key')}")
-        
-        if query_result.get('status_code') != 200:
-            logging.error(f"Failed to query child CIDs: {query_result}")
-            print(f"Failed to query child CIDs: {query_result}")
+            # Handle case where API returns bytes instead of dict (usually due to 308 redirect)
+            if isinstance(query_result, bytes):
+                logging.error("API returned bytes instead of expected dict response")
+                print("API endpoint returned unexpected response format (likely due to 308 redirect)")
+                print("This may indicate a region-specific endpoint issue or API version mismatch")
+                return []
             
-            # Handle 308 redirect specifically
-            if query_result['status_code'] == 308:
-                logging.info("Received 308 redirect, this may be a region-specific endpoint issue")
-                print("Received 308 redirect - this may indicate a region-specific endpoint issue")
+            # Handle case where API returns non-dict response
+            if not isinstance(query_result, dict):
+                logging.error(f"API returned unexpected type: {type(query_result)}")
+                print(f"API returned unexpected response type: {type(query_result)}")
+                return []
             
-            return []
+            logging.debug(f"query_result status_code: {query_result.get('status_code', 'No status_code key')}")
+            
+            if query_result.get('status_code') != 200:
+                logging.error(f"Failed to query child CIDs: {query_result}")
+                print(f"Failed to query child CIDs: {query_result}")
+                
+                # Handle 308 redirect specifically
+                if query_result.get('status_code') == 308:
+                    logging.info("Received 308 redirect, this may be a region-specific endpoint issue")
+                    print("Received 308 redirect - this may indicate a region-specific endpoint issue")
+                
+                return []
+            
+            # Get the resources from this page
+            page_resources = query_result['body']['resources']
+            
+            if not page_resources:
+                # No more results, break the pagination loop
+                logging.info(f"No more child CIDs found at offset {offset}")
+                break
+            
+            # Add this page's results to our total list
+            all_child_cid_ids.extend(page_resources)
+            logging.info(f"Retrieved {len(page_resources)} child CIDs on this page (total so far: {len(all_child_cid_ids)})")
+            print(f"  Retrieved {len(page_resources)} child CIDs on this page (total so far: {len(all_child_cid_ids)})")
+            
+            # Check if we got fewer results than requested, indicating last page
+            if len(page_resources) < limit:
+                logging.info("Retrieved fewer results than limit, assuming last page")
+                break
+            
+            # Move to next page
+            offset += limit
         
-        child_cid_ids = query_result['body']['resources']
+        child_cid_ids = all_child_cid_ids
         
         if not child_cid_ids:
             logging.warning("No child CIDs found in this parent account.")
             print("No child CIDs found in this parent account.")
             return []
         
-        logging.info(f"Found {len(child_cid_ids)} child CID IDs, retrieving details...")
+        logging.info(f"Found {len(child_cid_ids)} total child CID IDs: {child_cid_ids}")
+        print(f"\n✓ Successfully retrieved {len(child_cid_ids)} total child CID IDs from all pages")
         
         # Get detailed information for each child CID
         logging.debug(f"Calling get_children_v2 with {len(child_cid_ids)} IDs")
@@ -183,20 +217,35 @@ def get_child_cids(auth: OAuth2, name_filter: str = "") -> List[Dict]:
         
         # Apply name filter if specified
         if name_filter:
-            logging.debug(f"Applying filter '{name_filter}' to {len(child_cids)} child CIDs")
+            logging.info(f"Applying filter '{name_filter}' to {len(child_cids)} child CIDs")
+            # Remove wildcards from the filter for substring matching
+            clean_filter = name_filter.replace('*', '').strip()
+            logging.info(f"Cleaned filter: '{clean_filter}'")
+            
             filtered_cids = []
             for cid in child_cids:
                 try:
-                    if name_filter.lower() in cid['name'].lower():
+                    cid_name_lower = cid['name'].lower()
+                    clean_filter_lower = clean_filter.lower()
+                    match = clean_filter_lower in cid_name_lower
+                    
+                    if match:
                         filtered_cids.append(cid)
+                        logging.info(f"Match found: {cid['name']}")
+                        
                 except Exception as filter_error:
                     logging.error(f"Error filtering CID {cid}: {filter_error}")
                     logging.debug(f"CID data: {cid}")
                     logging.debug(f"CID name type: {type(cid.get('name', 'N/A'))}")
-                    logging.debug(f"Filter type: {type(name_filter)}")
-            # filtered_cids = [cid for cid in child_cids if name_filter.lower() in cid['name'].lower()]
+                    logging.debug(f"Filter type: {type(clean_filter)}")
             logging.info(f"Found {len(filtered_cids)} matching child CIDs out of {len(child_cids)} total")
-            print(f"Found {len(filtered_cids)} matching child CIDs out of {len(child_cids)} total")
+            print(f"\n✓ Found {len(filtered_cids)} matching child CIDs out of {len(child_cids)} total")
+            
+            if filtered_cids:
+                print("\nChild CIDs that will be affected:")
+                for i, cid in enumerate(filtered_cids, 1):
+                    print(f"  {i}. {cid['name']} ({cid['cid']})")
+            
             return filtered_cids
         
         logging.info(f"Found {len(child_cids)} child CIDs total")
