@@ -98,10 +98,11 @@ def get_user_inputs() -> Dict[str, str]:
     
     # Get IOA exclusion details
     print("\n--- IOA Exclusion Details ---")
-    print("Note: pattern_id comes from existing IOA detections in CrowdStrike Console")
+    print("Note: Use the ioa_pattern_finder.py script to discover available pattern IDs")
+    print("Run: python ioa_pattern_finder.py")
+    print("Or find pattern_id from existing IOA detections in CrowdStrike Console")
     print("Go to Activity > Detections, find the IOA detection, and copy the pattern ID")
     pattern_id = input("Enter IOA pattern_id (required): ").strip()
-    pattern_name = input("Enter pattern name (optional): ").strip()
     exclusion_name = input("Enter exclusion name: ").strip()
     exclusion_description = input("Enter exclusion description (optional): ").strip()
     image_filename = input("Enter image filename pattern (regex, optional): ").strip()
@@ -119,7 +120,6 @@ def get_user_inputs() -> Dict[str, str]:
         'client_secret': credentials['client_secret'],
         'cid_filter': cid_filter,
         'pattern_id': pattern_id,
-        'pattern_name': pattern_name,
         'exclusion_name': exclusion_name,
         'exclusion_description': exclusion_description,
         'image_filename': image_filename,
@@ -433,7 +433,7 @@ def find_windows_hosts_group(host_groups: List[Dict]) -> List[str]:
     return []
 
 
-def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, pattern_name: str, exclusion_name: str, exclusion_description: str, image_filename: str, command_line: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
+def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, exclusion_name: str, exclusion_description: str, image_filename: str, command_line: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
     """Create IOA exclusion for a specific CID."""
     try:
         logging.info(f"Creating IOA exclusion for CID {cid}: {exclusion_name}")
@@ -466,8 +466,6 @@ def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, pattern_name: str, e
             'groups': target_group_ids
         }
         
-        if pattern_name:
-            exclusion_params['pattern_name'] = pattern_name
         if exclusion_name:
             exclusion_params['name'] = exclusion_name
         if exclusion_description:
@@ -581,7 +579,6 @@ def main():
         result = create_ioa_exclusion_for_cid(
             cid, 
             inputs['pattern_id'],
-            inputs['pattern_name'],
             inputs['exclusion_name'],
             inputs['exclusion_description'],
             inputs['image_filename'],
@@ -613,7 +610,6 @@ def main():
     
     print(f"\nIOA Exclusion Details:")
     print(f"  Pattern ID: {inputs['pattern_id']}")
-    print(f"  Pattern Name: {inputs['pattern_name'] or 'None'}")
     print(f"  Name: {inputs['exclusion_name']}")
     print(f"  Description: {inputs['exclusion_description'] or 'None'}")
     print(f"  Image Filename Pattern (ifn_regex): {inputs['image_filename'] or 'None'}")
