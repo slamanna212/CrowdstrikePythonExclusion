@@ -433,16 +433,33 @@ def find_windows_hosts_group(host_groups: List[Dict]) -> List[str]:
     return []
 
 
-def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, exclusion_name: str, exclusion_description: str, image_filename: str, command_line: str, comment: str, auth_token: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
+def create_ioa_exclusion_for_cid(cid: str, pattern_id: str, exclusion_name: str, exclusion_description: str, image_filename: str, command_line: str, comment: str, client_id: str, client_secret: str, base_url: str = 'https://api.us-2.crowdstrike.com') -> Dict:
     """Create IOA exclusion for a specific CID."""
     try:
         logging.info(f"Creating IOA exclusion for CID {cid}: {exclusion_name}")
         
-        # Initialize IOAExclusions service for specific CID
-        ioa_exclusions = IOAExclusions(access_token=auth_token, base_url=base_url, member_cid=cid)
+        # Initialize IOAExclusions service for specific child CID
+        # Use client credentials with member_cid to properly target the child CID
+        logging.info(f"Initializing IOAExclusions for child CID: {cid}")
+        ioa_exclusions = IOAExclusions(
+            client_id=client_id,
+            client_secret=client_secret,
+            base_url=base_url,
+            member_cid=cid
+        )
+        logging.info(f"IOAExclusions initialized successfully for child CID: {cid}")
         
         # Get host groups for this CID and find Windows Hosts group
-        host_groups_details = get_host_groups_for_cid(cid, auth_token, base_url)
+        # Create a temporary auth token for this child CID
+        temp_auth = OAuth2(client_id=client_id, client_secret=client_secret, member_cid=cid, base_url=base_url)
+        temp_token_result = temp_auth.token()
+        if temp_token_result['status_code'] != 201:
+            logging.error(f"Failed to get auth token for child CID {cid}")
+            temp_auth_token = None
+        else:
+            temp_auth_token = temp_token_result['body']['access_token']
+        
+        host_groups_details = get_host_groups_for_cid(cid, temp_auth_token, base_url) if temp_auth_token else []
         
         if not host_groups_details:
             logging.warning(f"No host groups found for CID {cid}, creating exclusion without group restriction")
@@ -584,7 +601,8 @@ def main():
             inputs['image_filename'],
             inputs['command_line'],
             inputs['exclusion_comment'],
-            auth.token()['body']['access_token'],
+            inputs['client_id'],
+            inputs['client_secret'],
             getattr(auth, 'base_url', 'https://api.us-2.crowdstrike.com')
         )
         
